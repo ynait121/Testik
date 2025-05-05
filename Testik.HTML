@@ -1,0 +1,282 @@
+```html
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Классификация объектов по категориям</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', sans-serif;
+      background-color: #121212;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin-bottom: 10px;
+    }
+
+    video, canvas, #uploadedImage {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      max-width: 640px;
+      height: auto;
+      border-radius: 10px;
+    }
+
+    canvas {
+      pointer-events: none;
+    }
+
+    #uploadedImage {
+      display: none;
+    }
+
+    #output {
+      margin-top: 350px;
+      padding: 15px 20px;
+      background-color: rgba(0, 0, 0, 0.7);
+      border-radius: 8px;
+      text-align: left;
+      font-size: 16px;
+      width: 90%;
+      max-width: 600px;
+      min-height: 60px;
+    }
+
+    button, input[type="file"] {
+      margin-top: 10px;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      background-color: #1e88e5;
+      border: none;
+      color: white;
+      border-radius: 5px;
+      transition: background 0.3s ease;
+    }
+
+    button:hover,
+    input[type="file"]::file-selector-button {
+      background-color: #1565c0;
+    }
+
+    .category {
+      margin-top: 10px;
+    }
+
+    .category h3 {
+      margin: 10px 0 5px;
+      font-size: 18px;
+      color: #ffd700;
+    }
+
+    .items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-bottom: 10px;
+    }
+
+    .item {
+      background: #333;
+      padding: 4px 8px;
+      border-radius: 5px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔍 Классификация объектов по категориям</h1>
+  <video id="video" autoplay playsinline muted></video>
+  <img id="uploadedImage" alt="Загруженное изображение" />
+  <canvas id="canvas"></canvas>
+
+  <button onclick="startCamera()">▶️ Запустить камеру</button>
+  <input type="file" accept="image/*" capture="environment" onchange="handleImageUpload(event)" />
+
+  <div id="output">
+    <p>Выберите источник: камера или фото</p>
+  </div>
+
+  <!-- TensorFlow.js и COCO-SSD -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const output = document.getElementById('output');
+    const uploadedImage = document.getElementById('uploadedImage');
+
+    let model;
+    let isRunning = false;
+    let currentStream = null;
+    let isProcessing = false;
+
+    // Категории объектов
+    const categories = {
+      "people": ["person"],
+      "animals": ["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"],
+      "vehicles": ["bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat"],
+      "electronics": ["tv", "laptop", "mouse", "remote", "keyboard", "cell phone"],
+      "food": ["banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut"],
+      "others": []
+    };
+
+    async function loadModel() {
+      if (!model) {
+        updateOutput("Загрузка модели...");
+        try {
+          model = await cocoSsd.load();
+          updateOutput("<em>Модель загружена. Готов к работе.</em>");
+        } catch (err) {
+          updateOutput(`Ошибка загрузки модели: ${err.message}`);
+        }
+      }
+    }
+
+    function updateOutput(html) {
+      output.innerHTML = html;
+    }
+
+    async function startCamera() {
+      await loadModel();
+      stopAll();
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        currentStream = stream;
+        video.srcObject = stream;
+        await new Promise(resolve => video.onloadedmetadata = resolve);
+        video.play();
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
+        isRunning = true;
+        detectFrame();
+      } catch (err) {
+        updateOutput("Ошибка доступа к камере: " + err.message);
+      }
+    }
+
+    function handleImageUpload(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = async () => {
+        stopAll();
+        uploadedImage.src = reader.result;
+        uploadedImage.style.display = "block";
+        canvas.width = 640;
+        canvas.height = 480;
+
+        const img = new Image();
+        img.onload = async () => {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, 640, 480);
+          const predictions = await model.detect(img);
+          showResults(predictions);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function detectFrame() {
+      if (!isRunning || !model) return;
+
+      if (!isProcessing) {
+        isProcessing = true;
+        try {
+          const predictions = await model.detect(video);
+          drawBoxes(predictions);
+          showResults(predictions);
+        } catch (err) {
+          console.error("Ошибка распознавания:", err);
+        } finally {
+          isProcessing = false;
+        }
+      }
+
+      requestAnimationFrame(detectFrame);
+    }
+
+    function drawBoxes(predictions) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      predictions.forEach(pred => {
+        const [x, y, width, height] = pred.bbox;
+
+        let color = "#ff0000";
+        if (categories.people.includes(pred.class)) color = "#00ff00";
+        else if (categories.animals.includes(pred.class)) color = "#ffa500";
+        else if (categories.vehicles.includes(pred.class)) color = "#00ffff";
+        else if (categories.electronics.includes(pred.class)) color = "#ff00ff";
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, width, height);
+
+        ctx.fillStyle = color;
+        ctx.font = "16px Arial";
+        ctx.fillText(`${pred.class} (${(pred.score * 100).toFixed(1)}%)`, x + 5, y > 20 ? y - 5 : y + 20);
+      });
+    }
+
+    function showResults(predictions) {
+      const grouped = {};
+
+      predictions.forEach(pred => {
+        let category = Object.keys(categories).find(cat =>
+          categories[cat].includes(pred.class)
+        );
+        if (!category) category = "others";
+
+        if (!grouped[category]) grouped[category] = [];
+        grouped[category].push(pred);
+      });
+
+      output.innerHTML = "";
+
+      for (const cat in grouped) {
+        const items = grouped[cat].map(p => `<span class="item">${p.class}</span>`).join("");
+        output.innerHTML += `
+          <div class="category">
+            <h3>${cat.charAt(0).toUpperCase() + cat.slice(1)}</h3>
+            <div class="items">${items}</div>
+          </div>`;
+      }
+
+      if (Object.keys(grouped).length === 0) {
+        output.innerHTML = "<p>Ничего не найдено</p>";
+      }
+    }
+
+    function stopAll() {
+      isRunning = false;
+      isProcessing = false;
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+        currentStream = null;
+      }
+      uploadedImage.style.display = "none";
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    window.addEventListener('beforeunload', stopAll);
+  </script>
+</body>
+</html>
+```
